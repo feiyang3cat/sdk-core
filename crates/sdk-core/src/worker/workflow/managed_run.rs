@@ -7,14 +7,15 @@ use crate::{
         LEGACY_QUERY_ID, LocalActRequest, WorkflowErrorType,
         workflow::{
             ActivationAction, ActivationCompleteOutcome, ActivationCompleteResult,
-            ActivationOrAuto, BufferedTasks, EvictionRequestResult, FailedActivationWFTReport,
-            HeartbeatTimeoutMsg, HistoryUpdate, LocalActivityRequestSink, LocalResolution,
-            NextPageReq, OutstandingActivation, OutstandingTask, PermittedWFT, RequestEvictMsg,
-            RunBasics, ServerCommandsWithWorkflowInfo, TaskStorageMetrics, WFCommand,
+            ActivationOrAuto, BufferedTasks, EvictionRequestResult,
+            FailedActivationWFTReport, HeartbeatTimeoutMsg, HistoryUpdate,
+            LocalActivityRequestSink, LocalResolution, NextPageReq, OutstandingActivation,
+            OutstandingTask, PermittedWFT, RequestEvictMsg, RunBasics,
+            ServerCommandsWithWorkflowInfo, SpeculativeBlocks, TaskStorageMetrics, WFCommand,
             WFCommandVariant, WFMachinesError, WFT_HEARTBEAT_TIMEOUT_FRACTION, WFTReportStatus,
             WftFailureKind, WorkflowTaskInfo,
             history_update::HistoryPaginator,
-            machines::{MachinesWFTResponseContent, WorkflowMachines},
+            machines::{CheckpointReason, MachinesWFTResponseContent, WorkflowMachines},
         },
     },
 };
@@ -144,6 +145,10 @@ impl ManagedRun {
         self.waiting_on_la.is_some()
     }
 
+    pub(super) fn optimistic_window_open(&self) -> bool {
+        self.wfm.machines.optimistic_window_open()
+    }
+
     pub(super) fn have_seen_terminal_event(&self) -> bool {
         self.wfm.machines.have_seen_terminal_event
     }
@@ -224,6 +229,7 @@ impl ManagedRun {
         }
 
         self.paginator = Some(pwft.paginator);
+        self.wfm.machines.set_wft_received_at(start_time);
         self.wft = Some(OutstandingTask {
             info: wft_info,
             pending_queries,
@@ -327,6 +333,7 @@ impl ManagedRun {
             if let Some(id) = reset_last_started_to {
                 self.wfm.machines.reset_last_started_id(id);
             }
+            self.wfm.machines.optimistic_window_reported();
             // Tell the LA manager that we're done with the WFT
             if let Some(ref local_act_request_sink) = self.local_activity_request_sink {
                 local_act_request_sink.sink_reqs(vec![
@@ -384,6 +391,13 @@ impl ManagedRun {
                         self.wfm.machines.get_wf_activation(),
                     )));
                 }
+                // The speculation window has nothing left to wait for, or must checkpoint, while
+                // the workflow is idle.
+                if self.wfm.machines.optimistic_checkpoint_ready() {
+                    return Ok(Some(ActivationOrAuto::Autocomplete {
+                        run_id: self.run_id().to_string(),
+                    }));
+                }
             }
             if self
                 .waiting_on_la
@@ -423,6 +437,7 @@ impl ManagedRun {
         mut commands: Vec<WFCommand>,
         used_flags: Vec<u32>,
         versioning_behavior: VersioningBehavior,
+        speculative_blocks: SpeculativeBlocks,
         resp_chan: Option<oneshot::Sender<ActivationCompleteResult>>,
         is_forced_failure: bool,
     ) -> Result<RunUpdateAct, Box<NextPageReq>> {
@@ -521,6 +536,7 @@ impl ManagedRun {
                 resp_chan,
                 is_forced_failure,
                 versioning_behavior,
+                speculative_blocks,
             };
 
             // Verify we can actually apply the next workflow task, which will happen as part of
@@ -626,6 +642,8 @@ impl ManagedRun {
         is_auto_fail: bool,
         resp_chan: Option<oneshot::Sender<ActivationCompleteResult>>,
     ) -> RunUpdateAct {
+        // A failed workflow task's window is never sent
+        self.wfm.machines.drop_optimistic_window();
         let (tt, attempt) = if let Some(t) = self.wft.as_ref() {
             (t.info.task_token.clone(), t.info.attempt)
         } else {
@@ -688,6 +706,7 @@ impl ManagedRun {
                     ))],
                     vec![],
                     VersioningBehavior::Unspecified, // Doesn't matter since we're failing wf
+                    SpeculativeBlocks::default(),
                     resp_chan,
                     true,
                 )
@@ -738,6 +757,7 @@ impl ManagedRun {
                       "Evicting run before applying these local activity results, so those local \
                        activities will execute again when the run is replayed");
             }
+            self.wfm.machines.drop_optimistic_window();
         }
         if evict && let Some(sink) = self.local_activity_request_sink.as_deref() {
             let immediate_resolutions = sink.sink_reqs(vec![LocalActRequest::InvalidateRun(
@@ -793,6 +813,9 @@ impl ManagedRun {
         // Eviction must not advance the machines, but completed normal activations may have
         // buffered output while waiting on other LAs. Preserve that output before removing the run.
         if completion.activation_was_eviction {
+            self.wfm
+                .machines
+                .request_optimistic_checkpoint(CheckpointReason::Eviction);
             return Ok(Some(self.prepare_complete_resp(
                 completion.resp_chan,
                 data,
@@ -803,6 +826,10 @@ impl ManagedRun {
         let outcome = (|| {
             // Send commands from lang into the machines then check if the workflow run needs
             // another activation and mark it if so
+            self.wfm.machines.set_speculative_block_state(
+                completion.speculative_blocks.exited,
+                completion.speculative_blocks.active,
+            );
             self.wfm.push_commands_and_iterate(completion.commands)?;
             if let Some(update) = update_from_new_page {
                 self.wfm.feed_history_from_new_page(update)?;
@@ -853,7 +880,12 @@ impl ManagedRun {
                 if let Some(wola) = self.waiting_on_la.as_mut() {
                     wola.hb_timeout_handle.abort();
                 }
-                if completing_la_heartbeat || !data.query_responses.is_empty() {
+                // A speculation window still open here was asked to checkpoint because a local
+                // activity was scheduled, which can't share the window's workflow task.
+                if completing_la_heartbeat
+                    || !data.query_responses.is_empty()
+                    || self.wfm.machines.optimistic_window_open()
+                {
                     // Reporting a query while an LA is still running must request another WFT;
                     // otherwise the LA could resolve without a task on which to deliver its job.
                     let hb_timeout_handle = sink_heartbeat_timeout_start(
@@ -1236,6 +1268,13 @@ impl ManagedRun {
         let workflow_id = self.wfm.machines.workflow_id.clone();
         let can_report_eviction =
             data.activation_was_eviction && self.wft.is_some() && !self.am_broken;
+        // Query responses go out with the workflow task completion, which checkpoints the window
+        if !data.query_responses.is_empty() {
+            self.wfm
+                .machines
+                .request_optimistic_checkpoint(CheckpointReason::QueryResponse);
+        }
+        let window_holds_wft = self.wfm.machines.optimistic_window_wants_to_stay_open();
         let mut machines_wft_response = self.wfm.prepare_for_wft_response();
         let eviction_has_output = can_report_eviction
             && (machines_wft_response.commands().peek().is_some()
@@ -1254,6 +1293,7 @@ impl ManagedRun {
         // saw the final event in the workflow, or if we are playing back for the express purpose of
         // fulfilling a query. Eviction only reports output buffered by prior normal activations.
         let should_respond = !(machines_wft_response.activation_needed
+            || window_holds_wft
             || (machines_wft_response.replaying && !data.is_forced_failure)
             || is_query_playback
             || (data.activation_was_eviction && !eviction_has_output)
@@ -1750,6 +1790,7 @@ struct RunActivationCompletion {
     /// unblock. Must always be `Some` when initialized.
     resp_chan: Option<oneshot::Sender<ActivationCompleteResult>>,
     versioning_behavior: VersioningBehavior,
+    speculative_blocks: SpeculativeBlocks,
 }
 #[derive(Debug, derive_more::From)]
 enum ActOrFulfill {
