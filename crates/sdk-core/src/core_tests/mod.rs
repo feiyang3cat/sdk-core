@@ -2,6 +2,7 @@ mod activity_tasks;
 mod event_groups;
 mod local_activity_workflow_task;
 mod nexus_operations;
+mod optimistic_start;
 mod queries;
 mod query_eviction;
 mod replay_flag;
