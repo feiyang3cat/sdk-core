@@ -1881,6 +1881,8 @@ fn sorted(names: &[String]) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod optimistic_cancel_tests;
+#[cfg(test)]
 mod optimistic_tests;
 
 #[cfg(test)]
