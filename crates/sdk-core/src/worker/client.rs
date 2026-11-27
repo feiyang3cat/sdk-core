@@ -1249,26 +1249,6 @@ fn update_slots(slots_info: &mut Option<WorkerSlotsInfo>, client_heartbeat_data:
     }
 }
 
-/// The commands of each page a completion with these commands is sent in.
-#[cfg(test)]
-pub(crate) fn wft_completion_command_pages(commands: Vec<Command>) -> Vec<Vec<Command>> {
-    let request = RespondWorkflowTaskCompletedRequest {
-        commands,
-        ..Default::default()
-    };
-    match paginate_wft_completion(request, MAX_WFT_COMPLETION_PAGE_SIZE) {
-        WftCompletionPages::Single(r) => vec![r.commands],
-        WftCompletionPages::Paginated {
-            intermediate_pages,
-            final_page,
-        } => intermediate_pages
-            .into_iter()
-            .chain([final_page])
-            .map(|p| p.commands)
-            .collect(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,24 +1621,6 @@ mod tests {
             }
             // Every command is preserved exactly once across the intermediate pages.
             assert_eq!(total_commands, command_count);
-        }
-
-        /// The server reads request level fields only from the final page.
-        #[test]
-        fn request_level_fields_ride_on_the_final_page() {
-            let mut request = request_with((0..6).map(|_| command_with_payload(400)).collect());
-            request.worker_control_task_queue = "control".to_string();
-            request.force_create_new_workflow_task = true;
-            request.return_new_workflow_task = true;
-            let WftCompletionPages::Paginated { final_page, .. } =
-                paginate_wft_completion(request, 1024)
-            else {
-                panic!("expected multiple pages");
-            };
-            assert_eq!(final_page.worker_control_task_queue, "control");
-            assert_eq!(final_page.identity, "identity");
-            assert!(final_page.force_create_new_workflow_task);
-            assert!(final_page.return_new_workflow_task);
         }
 
         #[test]

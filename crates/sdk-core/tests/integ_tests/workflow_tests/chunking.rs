@@ -84,7 +84,6 @@ fn heartbeat_history(unchunked: bool) -> History {
         if task <= 2 {
             let timer_id = task.to_string();
             let started = history.add(TimerStartedEventAttributes {
-                optimistic_start: None,
                 timer_id: timer_id.clone(),
                 start_to_fire_timeout: Some(Duration::from_millis(1).try_into().unwrap()),
                 workflow_task_completed_event_id: if task == 1 { 4 } else { 9 },

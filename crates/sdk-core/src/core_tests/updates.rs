@@ -304,7 +304,6 @@ async fn replay_with_signal_and_update_same_task() {
             StartTimer {
                 seq: 1,
                 start_to_fire_timeout: Some(prost_dur!(from_secs(1))),
-                ..Default::default()
             }
             .into(),
             UpdateResponse {
@@ -862,7 +861,6 @@ fn signal_cmds_unless_flag(act: &WorkflowActivation, flag: u32) -> Vec<workflow_
             StartTimer {
                 seq: 1,
                 start_to_fire_timeout: Some(prost_dur!(from_secs(1))),
-                speculative: false,
             }
             .into(),
         ]

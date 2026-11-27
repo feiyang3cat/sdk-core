@@ -1058,8 +1058,6 @@ mod test {
                     cancelled_before_sent: false,
                     internal_flags: Rc::new(RefCell::new(InternalFlags::default())),
                     annotations: Default::default(),
-                    optimistic_scheduled_event_id: None,
-                    resolved_optimistically: false,
                 },
             );
             let cmds = s.cancel(Default::default()).unwrap();
@@ -1126,8 +1124,6 @@ mod test {
                 Canceled {}.into(),
                 SharedState {
                     scheduled_event_id: 5,
-                    optimistic_scheduled_event_id: None,
-                    resolved_optimistically: false,
                     started_event_id: 0,
                     attrs: Default::default(),
                     cancellation_type,

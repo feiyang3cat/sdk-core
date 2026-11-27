@@ -67,7 +67,6 @@ async fn out_of_order_completion_doesnt_hang() {
             StartTimer {
                 seq: 1,
                 start_to_fire_timeout: Some(prost_dur!(from_millis(50))),
-                ..Default::default()
             }
             .into(),
         ]

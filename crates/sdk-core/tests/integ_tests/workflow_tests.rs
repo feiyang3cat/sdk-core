@@ -14,7 +14,6 @@ mod modify_wf_properties;
 mod nexus;
 mod nexus_typed;
 mod nexus_workers;
-mod optimistic_start;
 mod patches;
 mod priority;
 mod queries;
@@ -197,7 +196,6 @@ async fn fail_wf_task(#[values(true, false)] replay: bool) {
             StartTimer {
                 seq: 0,
                 start_to_fire_timeout: Some(prost_dur!(from_millis(200))),
-                ..Default::default()
             }
             .into(),
         ],
@@ -328,7 +326,6 @@ async fn signal_workflow_signal_not_handled_on_workflow_completion() {
                 StartTimer {
                     seq: 0,
                     start_to_fire_timeout: Some(prost_dur!(from_millis(10))),
-                    ..Default::default()
                 }
                 .into(),
             ],

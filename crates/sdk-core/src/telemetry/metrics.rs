@@ -1447,7 +1447,7 @@ mod tests {
         a2.set(Arc::new(DummyCustomAttrs(2))).unwrap();
         // Verify all metrics are created. This number will need to get updated any time a metric
         // is added.
-        let num_metrics = 46;
+        let num_metrics = 35;
         #[allow(clippy::needless_range_loop)] // Sorry clippy, this reads easier.
         for metric_num in 2..=num_metrics + 1 {
             let hole = assert_matches!(&events[metric_num],
@@ -1463,8 +1463,7 @@ mod tests {
                 attributes,
                 update: MetricUpdateVal::Delta(1)
             }
-            // The forced eviction counter is the 35th instrument created
-            if DummyCustomAttrs::as_id(attributes) == 2 && instrument.get().0 == 35 + 1
+            if DummyCustomAttrs::as_id(attributes) == 2 && instrument.get().0 == num_metrics + 1
         );
         // Verify creating a new context with new attributes merges them properly
         let mc2 = mc.with_new_attrs([MetricKeyValue::new("gotta", "go fast")]);

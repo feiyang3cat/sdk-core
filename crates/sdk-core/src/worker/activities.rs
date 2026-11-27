@@ -1305,7 +1305,6 @@ mod tests {
             Duration::from_secs(1),
             None,
             local_timeout_buffer,
-            OptimisticActivities::new(),
         )
     }
 
@@ -1393,7 +1392,6 @@ mod tests {
             Duration::from_secs(1),
             None,
             Duration::from_secs(5),
-            OptimisticActivities::new(),
         );
         let start = Instant::now();
         let t1 = atm.poll().await.unwrap();
