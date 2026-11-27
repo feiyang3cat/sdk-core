@@ -6,6 +6,7 @@ mod driven_workflow;
 mod history_update;
 mod machines;
 mod managed_run;
+pub(crate) mod optimistic;
 mod run_cache;
 mod wft_extraction;
 pub(crate) mod wft_poller;
@@ -33,6 +34,7 @@ use crate::{
             LegacyQueryResult, REQUEST_TOO_LARGE_KEY, TaskInfo, WorkerClient,
             WorkflowTaskCompletion, payload_limit_violation_from,
         },
+        optimistic_activities::{Handoff, OptimisticActivities},
         workflow::{
             history_update::HistoryPaginator,
             machines::MachineError,
@@ -147,6 +149,7 @@ pub(crate) struct Workflows {
     default_versioning_behavior: Option<VersioningBehavior>,
     namespace_capabilities: Arc<NamespaceCapabilities>,
     shutdown_token: CancellationToken,
+    optimistic_activities: Option<Arc<OptimisticActivities>>,
 }
 
 pub(crate) struct WorkflowBasics {
@@ -158,10 +161,14 @@ pub(crate) struct WorkflowBasics {
     pub(crate) sdk_name: String,
     pub(crate) sdk_version: String,
     pub(crate) default_versioning_behavior: Option<VersioningBehavior>,
+    pub(crate) optimistic_activities: Option<Arc<OptimisticActivities>>,
+    /// Filled in by [Workflows::new]
+    pub(crate) optimistic_env: Option<Arc<dyn optimistic::OptimisticEnv>>,
 }
 
 pub(crate) struct RunBasics<'a> {
     pub(crate) worker_config: Arc<WorkerConfig>,
+    pub(crate) optimistic_env: Option<Arc<dyn optimistic::OptimisticEnv>>,
     pub(crate) workflow_id: String,
     pub(crate) workflow_type: String,
     pub(crate) run_id: String,
@@ -175,7 +182,7 @@ pub(crate) struct RunBasics<'a> {
 impl Workflows {
     #[allow(clippy::too_many_arguments)] // Not much worth combining here
     pub(super) fn new(
-        basics: WorkflowBasics,
+        mut basics: WorkflowBasics,
         sticky_attrs: Option<StickyExecutionAttributes>,
         client: Arc<dyn WorkerClient>,
         wft_semaphore: MeteredPermitDealer<WorkflowSlotKind>,
@@ -188,6 +195,33 @@ impl Workflows {
     ) -> Self {
         let (local_tx, local_rx) = unbounded_channel();
         let (fetch_tx, fetch_rx) = unbounded_channel();
+        let optimistic_activities = basics.optimistic_activities.clone();
+        if let Some(registry) = optimistic_activities.as_ref() {
+            let forward_tx: UnboundedSender<LocalInput> = local_tx.clone();
+            registry.set_forwarder(move |run_id, res| {
+                let _ = forward_tx.send(LocalInput {
+                    input: LocalResolutionMsg { run_id, res }.into(),
+                    span: Span::current(),
+                });
+            });
+            let activities = activity_tasks_handle.clone().ok_or_else(|| {
+                if basics
+                    .worker_config
+                    .max_task_queue_activities_per_second
+                    .is_some_and(|rps| rps > 0.0)
+                {
+                    optimistic::FallbackReason::RateLimited
+                } else {
+                    optimistic::FallbackReason::NoActivityWorker
+                }
+            });
+            basics.optimistic_env = Some(Arc::new(optimistic::OptimisticRuntime::new(
+                basics.namespace_capabilities.clone(),
+                activities,
+                registry.clone(),
+                local_tx.clone(),
+            )));
+        }
         let shutdown_tok = basics.shutdown_token.clone();
         let task_queue = basics.worker_config.task_queue.clone();
         let max_eager_activity_reservations_per_workflow_task = basics
@@ -218,6 +252,7 @@ impl Workflows {
         let (start_polling_tx, start_polling_rx) = oneshot::channel();
         // We must spawn a task to constantly poll the activation stream, because otherwise
         // activation completions would not cause anything to happen until the next poll.
+        let stream_registry = optimistic_activities.clone();
         let processing_task = thread::Builder::new()
             .name("workflow-processing".to_string())
             .spawn(move || {
@@ -272,6 +307,11 @@ impl Workflows {
                             }
                         }
                     }
+                    // No window can be checkpointed anymore, and lang's completions of their
+                    // activities must not wait for it.
+                    if let Some(registry) = stream_registry {
+                        registry.drop_all();
+                    }
                 });
             })
             .expect("Must be able to spawn workflow processing thread");
@@ -293,6 +333,7 @@ impl Workflows {
             default_versioning_behavior,
             namespace_capabilities,
             shutdown_token,
+            optimistic_activities,
         }
     }
 
@@ -388,6 +429,9 @@ impl Workflows {
             } => {
                 let reserved_act_permits =
                     self.reserve_activity_slots_for_outgoing_commands(commands.as_mut_slice());
+                if let Some(registry) = self.optimistic_activities.as_ref() {
+                    attach_optimistic_heartbeat_details(registry, run_id, &mut commands);
+                }
                 debug!(commands=%commands.display(), query_responses=%query_responses.display(),
                        messages=%messages.display(), force_new_wft,
                        "Sending responses to server");
@@ -403,6 +447,7 @@ impl Workflows {
                         0
                     };
                 let mut maybe_record_terminal_metric = detect_terminal_command(&commands);
+                let closes_workflow = maybe_record_terminal_metric.is_some();
                 let mut completion = WorkflowTaskCompletion {
                     task_token: task_token.clone(),
                     commands,
@@ -446,6 +491,14 @@ impl Workflows {
                             if response.reset_history_event_id > 0 {
                                 reset_last_started_to = Some(response.reset_history_event_id);
                             }
+                            if let Some(registry) = self.optimistic_activities.as_ref() {
+                                let handoff = registry.handoff(
+                                    run_id,
+                                    &response.optimistic_activity_tasks,
+                                    closes_workflow,
+                                );
+                                record_handoff_metrics(&run_metrics, handoff);
+                            }
                             if let Some(wft) = response.workflow_task {
                                 *wft_from_complete = Some(validate_wft(wft)?);
                             }
@@ -455,6 +508,17 @@ impl Workflows {
                             );
                         }
                         Err(e) => {
+                            // A rejected batch is never resent, so whatever its optimistic
+                            // activities do no longer matters.
+                            if let Some(registry) = self.optimistic_activities.as_ref() {
+                                record_handoff_metrics(
+                                    &run_metrics,
+                                    Handoff {
+                                        handed_off: vec![],
+                                        dropped: registry.drop_run(run_id),
+                                    },
+                                );
+                            }
                             let cause_and_failure =
                                 if e.metadata().contains_key(REQUEST_TOO_LARGE_KEY) {
                                     // Completion exceeds the namespace's recombined size limit, so the
@@ -1228,6 +1292,36 @@ impl EvictionRequestResult {
     }
 }
 
+fn record_handoff_metrics(metrics: &MetricsContext, handoff: Handoff) {
+    for activity_type in handoff.handed_off {
+        metrics
+            .with_new_attrs([metrics::activity_type(activity_type)])
+            .optimistic_activity_handed_off();
+    }
+    for activity_type in handoff.dropped {
+        metrics
+            .with_new_attrs([metrics::activity_type(activity_type)])
+            .optimistic_activity_dropped();
+    }
+}
+
+/// Optimistic activities still running at a checkpoint carry their latest heartbeat details to
+/// the server.
+fn attach_optimistic_heartbeat_details(
+    registry: &OptimisticActivities,
+    run_id: &str,
+    commands: &mut [Command],
+) {
+    for cmd in commands {
+        if let Some(Attributes::ScheduleActivityTaskCommandAttributes(attrs)) =
+            cmd.attributes.as_mut()
+            && let Some(os) = attrs.optimistic_start.as_mut()
+        {
+            os.heartbeat_details = registry.heartbeat_details(run_id, &attrs.activity_id);
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn detect_terminal_command(
     commands: &[ProtoCommand],
@@ -1481,6 +1575,10 @@ fn validate_completion(
                 commands,
                 used_flags: success.used_internal_flags,
                 versioning_behavior: success.versioning_behavior.try_into().unwrap_or_default(),
+                speculative_blocks: SpeculativeBlocks {
+                    exited: success.speculative_block_exited,
+                    active: success.speculative_block_active,
+                },
             })
         }
         Some(workflow_activation_completion::Status::Failed(failure)) => {
@@ -1505,12 +1603,22 @@ enum ValidatedCompletion {
         commands: Vec<WFCommand>,
         used_flags: Vec<u32>,
         versioning_behavior: VersioningBehavior,
+        speculative_blocks: SpeculativeBlocks,
     },
     Fail {
         run_id: String,
         failure: Failure,
         is_autocomplete: bool,
     },
+}
+
+/// Speculative block state lang reports with an activation completion.
+#[derive(Debug, Default, Clone, Copy)]
+struct SpeculativeBlocks {
+    /// A speculative block exited during the activation
+    exited: bool,
+    /// At least one speculative block is active at the end of the activation
+    active: bool,
 }
 
 impl ValidatedCompletion {
@@ -1523,21 +1631,18 @@ impl ValidatedCompletion {
 }
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // Local activity resolutions are by far the most common
 pub(crate) enum LocalResolution {
     LocalActivity(LocalActivityResolution),
+    Optimistic(optimistic::OptimisticResult),
 }
 impl LocalResolution {
-    fn seq(&self) -> u32 {
-        match self {
-            LocalResolution::LocalActivity(lar) => lar.seq,
-        }
-    }
-
     fn is_la_cancel_confirmation(&self) -> bool {
         match self {
             LocalResolution::LocalActivity(lar) => {
                 matches!(lar.result, LocalActivityExecutionResult::Cancelled(_))
             }
+            LocalResolution::Optimistic(_) => false,
         }
     }
 }
@@ -1739,6 +1844,7 @@ enum CommandID {
 #[derive(Debug, Clone)]
 struct WorkflowStartedInfo {
     workflow_task_timeout: Option<Duration>,
+    workflow_run_timeout: Option<Duration>,
     memo: Option<Memo>,
     search_attrs: Option<SearchAttributes>,
     retry_policy: Option<RetryPolicy>,
