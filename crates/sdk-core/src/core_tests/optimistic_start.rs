@@ -4,8 +4,8 @@ use crate::{
     ActivityHeartbeat, PollError, Worker,
     replay::{DEFAULT_WORKFLOW_TYPE, TestHistoryBuilder},
     test_help::{
-        CounterRecordingMeter, MockPollCfg, MocksHolder, build_mock_pollers,
-        drain_pollers_and_shutdown, mock_worker, schedule_local_activity_cmd,
+        CounterRecordingMeter, MockPollCfg, MocksHolder, WorkerExt, build_mock_pollers,
+        mock_worker, schedule_local_activity_cmd,
     },
     worker::client::{
         MockWorkerClient, WorkflowTaskCompletion, mocks::mock_worker_client,
@@ -345,7 +345,7 @@ async fn window_records_ordered_log_and_hands_off() {
     client
         .expect_complete_activity_task()
         .withf(|token, res| {
-            *token == TaskToken::from(b"real-4".to_vec())
+            token.task_token == TaskToken::from(b"real-4".to_vec())
                 && res.as_ref().map(|p| p.payloads.clone()) == Some(vec![result(4)])
         })
         .times(1)
@@ -433,7 +433,7 @@ async fn window_records_ordered_log_and_hands_off() {
     let (token4, _) = poll_start(&core).await;
     complete_activity(&core, &token4, 4).await;
 
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// Tasks for optimistic activities carry the timeouts the server fills in when it schedules an
@@ -498,7 +498,7 @@ async fn optimistic_activity_tasks_have_server_timeouts() {
         complete_activity(&core, &task.task_token.into(), seq).await;
     }
 
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A local activity scheduled while the window is open checkpoints the window.
@@ -546,7 +546,7 @@ async fn non_deferrable_command_checkpoints() {
     assert_matches!(cancel.variant, Some(activity_task::Variant::Cancel(_)));
     complete_activity(&core, &token, 1).await;
 
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
     assert_eq!(
         meter.counter_total(
             "speculation_window_checkpoint",
@@ -577,7 +577,7 @@ async fn deadline_checkpoints_and_heartbeats_follow_handoff() {
         });
     client
         .expect_complete_activity_task()
-        .withf(|token, _| *token == TaskToken::from(b"real-1".to_vec()))
+        .withf(|token, _| token.task_token == TaskToken::from(b"real-1".to_vec()))
         .times(1)
         .returning(|_, _| Ok(RespondActivityTaskCompletedResponse::default()));
     let (core, mut completions, meter) = optimistic_worker_metered(
@@ -643,7 +643,7 @@ async fn deadline_checkpoints_and_heartbeats_follow_handoff() {
         .await
         .unwrap();
     assert_eq!(
-        heartbeats.lock().unwrap()[0].0,
+        heartbeats.lock().unwrap()[0].0.task_token,
         TaskToken::from(b"real-1".to_vec())
     );
     complete_activity(&core, &token, 1).await;
@@ -671,7 +671,7 @@ async fn failure_is_handed_off() {
     let mut client = mock_worker_client();
     client
         .expect_fail_activity_task()
-        .withf(|token, _, _, _| *token == TaskToken::from(b"real-1".to_vec()))
+        .withf(|token, _, _, _| token.task_token == TaskToken::from(b"real-1".to_vec()))
         .times(1)
         .returning(|_, _, _, _| Ok(RespondActivityTaskFailedResponse::default()));
     let (core, mut completions, meter) = optimistic_worker_metered(
@@ -723,7 +723,7 @@ async fn async_completion_fails_the_attempt() {
     client
         .expect_fail_activity_task()
         .withf(|token, _, failure, _| {
-            *token == TaskToken::from(b"real-1".to_vec())
+            token.task_token == TaskToken::from(b"real-1".to_vec())
                 && failure
                     .as_ref()
                     .is_some_and(|f| f.message.contains("can't complete asynchronously"))
@@ -791,7 +791,7 @@ async fn ineligible_command_disables_window() {
         describe(&wtc.commands),
         ["schedule act-1", "schedule act-2"]
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// History records the window with the same event ids Core predicted, so replaying the
@@ -890,7 +890,7 @@ async fn next_task_applies_batch_without_jobs() {
     core.complete_workflow_activation(completion(&run_id, vec![complete_workflow()], false, false))
         .await
         .unwrap();
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 fn cancel_activity(seq: u32) -> workflow_command::Variant {
@@ -909,7 +909,7 @@ async fn try_cancel_is_logged_and_reported_after_handoff() {
     let mut client = mock_worker_client();
     client
         .expect_cancel_activity_task()
-        .withf(|token, _| *token == TaskToken::from(b"real-1".to_vec()))
+        .withf(|token, _| token.task_token == TaskToken::from(b"real-1".to_vec()))
         .times(1)
         .returning(|_, _| Ok(RespondActivityTaskCanceledResponse::default()));
     let (core, mut completions) = optimistic_worker(
@@ -965,7 +965,7 @@ async fn try_cancel_is_logged_and_reported_after_handoff() {
     .await
     .unwrap();
 
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A workflow waiting for the cancellation of an optimistic activity observes it inside the
@@ -1026,7 +1026,7 @@ async fn wait_cancellation_completed_resolves_in_window() {
             "complete"
         ]
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A batch too large for one request goes out as a paginated completion when the namespace
@@ -1107,7 +1107,7 @@ async fn large_batch_is_paginated() {
         pages.len()
     );
     assert_eq!(pages.concat(), wtc.commands);
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// When the server rejects the checkpoint, local executions are cancelled, their outcomes are
@@ -1148,7 +1148,7 @@ async fn rejected_checkpoint_drops_window() {
     assert_eq!(cancel.task_token, token.clone().into_inner());
     // No activity RPC is expected for the discarded outcome
     complete_activity(&core, &token, 1).await;
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
     assert!(completions.try_recv().is_err());
     assert_eq!(
         meter.counter_total("optimistic_activity_dropped", &[]),
@@ -1206,7 +1206,7 @@ async fn sequential_blocks_share_window() {
             "complete"
         ]
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A local activity scheduled while a window is open checkpoints it, requesting a new workflow
@@ -1254,7 +1254,7 @@ async fn local_activity_checkpoints_window() {
     })
     .await
     .unwrap();
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// Metrics follow a window from its optimistic starts to the checkpoint and handoff.
@@ -1304,7 +1304,7 @@ async fn metrics_follow_window_lifecycle() {
         .unwrap();
     completions.recv().await.unwrap();
     complete_activity(&core, &token1, 1).await;
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 
     let wf = ("workflow_type", DEFAULT_WORKFLOW_TYPE);
     let act_type = ("activity_type", "act");
@@ -1363,7 +1363,7 @@ async fn metrics_count_fallbacks() {
     .await
     .unwrap();
     completions.recv().await.unwrap();
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
     assert_eq!(
         meter.counter_total(
             "optimistic_start_fallback",
@@ -1480,7 +1480,7 @@ async fn server_cancel_reaches_handed_off_activity(
     let real_for_hb = real.clone();
     client
         .expect_record_activity_heartbeat()
-        .withf(move |token, _| *token == real_for_hb)
+        .withf(move |token, _| token.task_token == real_for_hb)
         .returning(move |_, _| match how {
             ServerCancel::HeartbeatNotFound => Err(tonic::Status::not_found("gone")),
             ServerCancel::HeartbeatCancelRequested => Ok(RecordActivityTaskHeartbeatResponse {
@@ -1492,7 +1492,7 @@ async fn server_cancel_reaches_handed_off_activity(
     let real_for_cancel = real.clone();
     client
         .expect_cancel_activity_task()
-        .withf(move |token, _| *token == real_for_cancel)
+        .withf(move |token, _| token.task_token == real_for_cancel)
         .times(match how {
             ServerCancel::HeartbeatNotFound => 0,
             _ => 1,
@@ -1564,13 +1564,13 @@ async fn closing_checkpoint_hands_off_and_cancels(
     let r = real.clone();
     client
         .expect_record_activity_heartbeat()
-        .withf(move |token, _| *token == r)
+        .withf(move |token, _| token.task_token == r)
         .times(1..)
         .returning(|_, _| Ok(RecordActivityTaskHeartbeatResponse::default()));
     let r = real.clone();
     client
         .expect_cancel_activity_task()
-        .withf(move |token, _| *token == r)
+        .withf(move |token, _| token.task_token == r)
         .times(1)
         .returning(|_, _| Err(tonic::Status::not_found("workflow closed")));
     let (core, mut completions, meter) = optimistic_worker_metered(
@@ -1634,7 +1634,7 @@ async fn closing_checkpoint_hands_off_and_cancels(
     })
     .await
     .unwrap();
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
     assert_eq!(
         meter.counter_total("optimistic_activity_handed_off", &[]),
         1
@@ -1649,7 +1649,7 @@ async fn cancel_before_lang_receives_task() {
     let mut client = mock_worker_client();
     client
         .expect_cancel_activity_task()
-        .withf(|token, _| *token == TaskToken::from(b"real-1".to_vec()))
+        .withf(|token, _| token.task_token == TaskToken::from(b"real-1".to_vec()))
         .times(1)
         .returning(|_, _| Ok(RespondActivityTaskCanceledResponse::default()));
     let (core, mut completions) = optimistic_worker(
@@ -1707,7 +1707,7 @@ async fn cancel_before_lang_receives_task() {
     })
     .await
     .unwrap();
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// Lang's completion of an optimistic activity is held until its fate is known. When the server
@@ -1766,7 +1766,7 @@ async fn held_completion_released_when_checkpoint_rejected() {
             "complete"
         ]
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// The run is evicted while the window is open and a completion the workflow can't observe is
@@ -1776,7 +1776,7 @@ async fn held_completion_released_when_run_evicted() {
     let mut client = mock_worker_client();
     client
         .expect_complete_activity_task()
-        .withf(|token, _| *token == TaskToken::from(b"real-1".to_vec()))
+        .withf(|token, _| token.task_token == TaskToken::from(b"real-1".to_vec()))
         .times(1)
         .returning(|_, _| Ok(RespondActivityTaskCompletedResponse::default()));
     let (core, mut completions) = optimistic_worker(
@@ -1836,7 +1836,7 @@ async fn held_completion_released_when_run_evicted() {
             "cancel 5"
         ]
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A completion held while the window waits on other optimistic work is released once the window
@@ -1846,7 +1846,7 @@ async fn held_completion_released_at_shutdown() {
     let mut client = mock_worker_client();
     client
         .expect_complete_activity_task()
-        .withf(|token, _| *token == TaskToken::from(b"real-1".to_vec()))
+        .withf(|token, _| token.task_token == TaskToken::from(b"real-1".to_vec()))
         .times(1)
         .returning(|_, _| Ok(RespondActivityTaskCompletedResponse::default()));
     let (core, mut completions) = optimistic_worker(

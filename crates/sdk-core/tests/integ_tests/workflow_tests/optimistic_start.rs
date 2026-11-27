@@ -25,8 +25,7 @@ use temporalio_common::protos::{
     },
 };
 use temporalio_sdk_core::{
-    PollError, Worker as CoreWorker, replay::HistoryForReplay,
-    test_help::drain_pollers_and_shutdown,
+    PollError, Worker as CoreWorker, replay::HistoryForReplay, test_help::WorkerExt,
 };
 use tonic::IntoRequest;
 
@@ -375,7 +374,7 @@ async fn optimistic_start_example_flow() {
 
     let replayed = replay(&tq, events, workflow).await;
     assert_eq!(replayed, observed);
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// An activity still running at the 80% deadline is handed off, carrying its latest heartbeat,
@@ -454,7 +453,7 @@ async fn optimistic_start_long_activity_handed_off() {
         replayed.iter().map(|o| &o.jobs).collect::<Vec<_>>(),
         jobs.iter().collect::<Vec<_>>()
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A failed optimistic attempt checkpoints the window and is reported through the normal RPC, so
@@ -526,7 +525,7 @@ async fn optimistic_start_failure_is_retried_by_server() {
         replayed.iter().map(|o| &o.jobs).collect::<Vec<_>>(),
         jobs.iter().collect::<Vec<_>>()
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A timer runs locally and moves workflow time forward, and its firing is recorded in the
@@ -564,7 +563,7 @@ async fn optimistic_start_local_timer() {
     );
     let replayed = replay(&tq, events, workflow).await;
     assert_eq!(replayed, observed);
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// A signal arriving during a window is delivered after the checkpoint, in an activation of its
@@ -635,7 +634,7 @@ async fn optimistic_start_signal_during_window() {
         replayed.iter().map(|o| &o.jobs).collect::<Vec<_>>(),
         jobs.iter().collect::<Vec<_>>()
     );
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 fn cancel_activity(seq: u32) -> workflow_command::Variant {
@@ -702,7 +701,7 @@ async fn optimistic_start_workflow_closes_in_checkpoint() {
     );
     let replayed = replay(&tq, events, workflow).await;
     assert_eq!(replayed, observed);
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// An activity scheduled and cancelled in the same activation, between other optimistic commands,
@@ -816,7 +815,7 @@ async fn optimistic_start_schedule_and_cancel_in_same_activation() {
     })
     .await;
     assert_eq!(replayed, observed);
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }
 
 /// Two timers fire together. The workflow cancels the one it hasn't seen yet when the other is
@@ -883,5 +882,5 @@ async fn optimistic_start_timer_cancel_races_firing() {
     assert_eq!(canceled, cancelled_id);
     let replayed = replay(&tq, events, workflow).await;
     assert_eq!(replayed, observed);
-    drain_pollers_and_shutdown(&core).await;
+    core.drain_pollers_and_shutdown_ref().await;
 }

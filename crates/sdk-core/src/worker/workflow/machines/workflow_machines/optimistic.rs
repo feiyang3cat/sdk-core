@@ -216,7 +216,7 @@ impl WorkflowMachines {
     /// completed (checkpointed) even though lang has nothing new to say.
     pub(crate) fn optimistic_checkpoint_ready(&self) -> bool {
         self.optimistic_window_open()
-            && !self.has_pending_jobs()
+            && !self.activation_needed()
             && !self.optimistic_window_wants_to_stay_open()
     }
 
@@ -464,7 +464,7 @@ impl WorkflowMachines {
     /// Delivers the next resolution recorded in history, if the workflow is idle and produced
     /// exactly as many commands as were recorded before it.
     fn deliver_peeked_resolution(&mut self) -> Result<()> {
-        if self.has_pending_jobs() {
+        if self.activation_needed() {
             return Ok(());
         }
         let Some(next) = peek_resolutions(
@@ -929,7 +929,7 @@ impl WorkflowMachines {
     /// Delivers at most one queued outcome, and only into an activation of its own, so replay
     /// can reproduce which activation observed it.
     fn deliver_queued_optimistic_outcome(&mut self) -> Result<()> {
-        if self.has_pending_jobs() {
+        if self.activation_needed() {
             return Ok(());
         }
         let Some(env) = self.optimistic.env.clone() else {

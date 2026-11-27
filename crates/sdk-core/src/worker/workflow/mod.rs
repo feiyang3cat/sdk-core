@@ -1637,12 +1637,6 @@ pub(crate) enum LocalResolution {
     Optimistic(optimistic::OptimisticResult),
 }
 impl LocalResolution {
-    fn seq(&self) -> u32 {
-        match self {
-            LocalResolution::LocalActivity(lar) => lar.seq,
-        }
-    }
-
     fn is_la_cancel_confirmation(&self) -> bool {
         match self {
             LocalResolution::LocalActivity(lar) => {

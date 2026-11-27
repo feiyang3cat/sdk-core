@@ -7,13 +7,12 @@ use crate::{
         LEGACY_QUERY_ID, LocalActRequest, WorkflowErrorType,
         workflow::{
             ActivationAction, ActivationCompleteOutcome, ActivationCompleteResult,
-            ActivationOrAuto, BufferedTasks, EvictionRequestResult,
-            FailedActivationWFTReport, HeartbeatTimeoutMsg, HistoryUpdate,
-            LocalActivityRequestSink, LocalResolution, NextPageReq, OutstandingActivation,
-            OutstandingTask, PermittedWFT, RequestEvictMsg, RunBasics,
-            ServerCommandsWithWorkflowInfo, SpeculativeBlocks, TaskStorageMetrics, WFCommand,
-            WFCommandVariant, WFMachinesError, WFT_HEARTBEAT_TIMEOUT_FRACTION, WFTReportStatus,
-            WftFailureKind, WorkflowTaskInfo,
+            ActivationOrAuto, BufferedTasks, EvictionRequestResult, FailedActivationWFTReport,
+            HeartbeatTimeoutMsg, HistoryUpdate, LocalActivityRequestSink, LocalResolution,
+            NextPageReq, OutstandingActivation, OutstandingTask, PermittedWFT, RequestEvictMsg,
+            RunBasics, ServerCommandsWithWorkflowInfo, SpeculativeBlocks, TaskStorageMetrics,
+            WFCommand, WFCommandVariant, WFMachinesError, WFT_HEARTBEAT_TIMEOUT_FRACTION,
+            WFTReportStatus, WftFailureKind, WorkflowTaskInfo,
             history_update::HistoryPaginator,
             machines::{CheckpointReason, MachinesWFTResponseContent, WorkflowMachines},
         },
@@ -1667,7 +1666,7 @@ impl WorkflowManager {
     fn notify_of_local_result(&mut self, resolved: LocalResolution) -> Result<()> {
         if self.awaiting_activation_completion || self.awaiting_next_wft {
             debug!(
-                seq = resolved.seq(),
+                resolution = ?resolved,
                 awaiting_activation_completion = self.awaiting_activation_completion,
                 awaiting_next_wft = self.awaiting_next_wft,
                 "Deferring local resolution"
@@ -1758,7 +1757,10 @@ impl WorkflowManager {
     fn deferred_local_activity_seqs(&self) -> Vec<u32> {
         self.deferred_local_resolutions
             .iter()
-            .map(LocalResolution::seq)
+            .filter_map(|resolution| match resolution {
+                LocalResolution::LocalActivity(activity) => Some(activity.seq),
+                LocalResolution::Optimistic(_) => None,
+            })
             .collect()
     }
 }
@@ -2625,6 +2627,7 @@ mod tests {
             history.add_workflow_task_scheduled_and_started();
             let mut live = WorkflowManager::new(RunBasics {
                 worker_config: test_worker_cfg().build().unwrap().into(),
+                optimistic_env: None,
                 workflow_id: "chunking-mode".to_owned(),
                 workflow_type: DEFAULT_WORKFLOW_TYPE.to_owned(),
                 run_id: history.get_orig_run_id().to_owned(),

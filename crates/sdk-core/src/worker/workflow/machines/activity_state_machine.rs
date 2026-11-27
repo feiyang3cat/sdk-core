@@ -1126,6 +1126,8 @@ mod test {
                 Canceled {}.into(),
                 SharedState {
                     scheduled_event_id: 5,
+                    optimistic_scheduled_event_id: None,
+                    resolved_optimistically: false,
                     started_event_id: 0,
                     attrs: Default::default(),
                     cancellation_type,

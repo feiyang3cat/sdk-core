@@ -634,7 +634,7 @@ impl Live {
     /// Whether Core would send the workflow task completion now.
     fn completion_due(&self) -> bool {
         self.outstanding.is_none()
-            && !self.wfm.machines.has_pending_jobs()
+            && !self.wfm.machines.activation_needed()
             && !self.wfm.machines.optimistic_window_wants_to_stay_open()
     }
 
@@ -643,7 +643,8 @@ impl Live {
     fn send_completion(&mut self) -> (Vec<String>, Vec<String>) {
         assert!(self.completion_due(), "the completion isn't due yet");
         let commands: Vec<_> = self.wfm.machines.get_commands().collect();
-        self.wfm.wft_completion_reported();
+        self.wfm.hold_local_resolutions_until_next_wft();
+        self.wfm.machines.optimistic_window_reported();
         let handed_off = self
             .server
             .record(&mut self.history, &commands, self.wft_started);
@@ -669,6 +670,7 @@ impl Live {
             .new_work_from_server(
                 self.history.get_one_wft(self.wft_number).unwrap().into(),
                 vec![],
+                false,
             )
             .unwrap();
         let jobs = job_names(&act.jobs);
